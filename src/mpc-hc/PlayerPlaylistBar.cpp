@@ -1,6 +1,6 @@
 /*
  * (C) 2003-2006 Gabest
- * (C) 2006-2014 see Authors.txt
+ * (C) 2006-2015 see Authors.txt
  *
  * This file is part of MPC-HC.
  *
@@ -79,6 +79,8 @@ BOOL CPlayerPlaylistBar::Create(CWnd* pParentWnd, UINT defDockBarID)
 
     m_fakeImageList.Create(1, 16, ILC_COLOR4, 10, 10);
     m_list.SetImageList(&m_fakeImageList, LVSIL_SMALL);
+
+    m_dropTarget.Register(this);
 
     return TRUE;
 }
@@ -255,22 +257,16 @@ void CPlayerPlaylistBar::ResolveLinkFiles(CAtlList<CString>& fns)
 {
     // resolve .lnk files
 
-    CComPtr<IShellLink> pSL;
-    pSL.CoCreateInstance(CLSID_ShellLink);
-    CComQIPtr<IPersistFile> pPF = pSL;
-
     POSITION pos = fns.GetHeadPosition();
-    while (pSL && pPF && pos) {
+    while (pos) {
         CString& fn = fns.GetNext(pos);
-        TCHAR buff[MAX_PATH];
-        if (CPath(fn).GetExtension().MakeLower() != _T(".lnk")
-                || FAILED(pPF->Load(CStringW(fn), STGM_READ))
-                || FAILED(pSL->Resolve(nullptr, SLR_ANY_MATCH | SLR_NO_UI))
-                || FAILED(pSL->GetPath(buff, _countof(buff), nullptr, 0))) {
-            continue;
-        }
 
-        fn = buff;
+        if (PathUtils::IsLinkFile(fn)) {
+            CString fnResolved = PathUtils::ResolveLinkFile(fn);
+            if (!fnResolved.IsEmpty()) {
+                fn = fnResolved;
+            }
+        }
     }
 }
 
@@ -770,6 +766,13 @@ void CPlayerPlaylistBar::SetCurTime(REFERENCE_TIME rt)
     }
 }
 
+void CPlayerPlaylistBar::Randomize()
+{
+    m_pl.Randomize();
+    SetupList();
+    SavePlaylist();
+}
+
 OpenMediaData* CPlayerPlaylistBar::GetCurOMD(REFERENCE_TIME rtStart)
 {
     CPlaylistItem* pli = GetCur();
@@ -892,13 +895,13 @@ void CPlayerPlaylistBar::SavePlaylist()
 }
 
 BEGIN_MESSAGE_MAP(CPlayerPlaylistBar, CPlayerBar)
+    ON_WM_DESTROY()
     ON_WM_SIZE()
     ON_NOTIFY(LVN_KEYDOWN, IDC_PLAYLIST, OnLvnKeyDown)
     ON_NOTIFY(NM_DBLCLK, IDC_PLAYLIST, OnNMDblclkList)
     //ON_NOTIFY(NM_CUSTOMDRAW, IDC_PLAYLIST, OnCustomdrawList)
     ON_WM_DRAWITEM()
     ON_COMMAND_EX(ID_PLAY_PLAY, OnPlayPlay)
-    ON_WM_DROPFILES()
     ON_NOTIFY(LVN_BEGINDRAG, IDC_PLAYLIST, OnBeginDrag)
     ON_WM_MOUSEMOVE()
     ON_WM_LBUTTONUP()
@@ -935,6 +938,12 @@ void CPlayerPlaylistBar::ResizeListColumn()
         Invalidate();
         m_list.RedrawWindow(nullptr, nullptr, RDW_FRAME | RDW_INVALIDATE);
     }
+}
+
+void CPlayerPlaylistBar::OnDestroy()
+{
+    m_dropTarget.Revoke();
+    __super::OnDestroy();
 }
 
 void CPlayerPlaylistBar::OnSize(UINT nType, int cx, int cy)
@@ -1110,24 +1119,19 @@ BOOL CPlayerPlaylistBar::OnPlayPlay(UINT nID)
     return FALSE;
 }
 
-void CPlayerPlaylistBar::OnDropFiles(HDROP hDropInfo)
+DROPEFFECT CPlayerPlaylistBar::OnDropAccept(COleDataObject*, DWORD, CPoint)
+{
+    return DROPEFFECT_COPY;
+}
+
+void CPlayerPlaylistBar::OnDropFiles(CAtlList<CString>& slFiles, DROPEFFECT)
 {
     SetForegroundWindow();
     m_list.SetFocus();
 
-    CAtlList<CString> sl;
+    PathUtils::ParseDirs(slFiles);
 
-    UINT nFiles = ::DragQueryFile(hDropInfo, UINT_MAX, nullptr, 0);
-    for (UINT iFile = 0; iFile < nFiles; iFile++) {
-        TCHAR szFileName[MAX_PATH];
-        ::DragQueryFile(hDropInfo, iFile, szFileName, MAX_PATH);
-        sl.AddTail(szFileName);
-    }
-    ::DragFinish(hDropInfo);
-
-    m_pMainFrame->ParseDirs(sl);
-
-    Append(sl, true);
+    Append(slFiles, true);
 }
 
 void CPlayerPlaylistBar::OnBeginDrag(NMHDR* pNMHDR, LRESULT* pResult)
@@ -1476,9 +1480,7 @@ void CPlayerPlaylistBar::OnContextMenu(CWnd* /*pWnd*/, CPoint p)
             SavePlaylist();
             break;
         case M_RANDOMIZE:
-            m_pl.Randomize();
-            SetupList();
-            SavePlaylist();
+            Randomize();
             break;
         case M_CLIPBOARD:
             if (OpenClipboard() && EmptyClipboard()) {
